@@ -1,27 +1,49 @@
 {
-  "manifest_version": 3,
+  "manifest_version": 2,
   "name": "Auto Youtube Shorts Scroller",
   "version": "3.1.3",
+  "description": "Automatically scrolls to the next Youtube Short when one ends!",
+  
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "auto-youtube-shorts-scroller@soradgaming.github.io",
+      "strict_min_version": "79.0"
+    }
+  },
+  
   "content_scripts": [
     {
       "matches": ["https://www.youtube.com/*"],
-      "js": ["./dist/content.js"]
+      "js": ["dist/content.js"],
+      "run_at": "document_end"
     }
   ],
-  "permissions": ["tabs", "storage"],
+  
+  "background": {
+    "scripts": ["dist/background.js"],
+    "persistent": false
+  },
+  
+  "browser_action": {
+    "default_popup": "popup/popup.html",
+    "default_icon": {
+      "16": "img/autoYTScrollerIcon16.png",
+      "48": "img/autoYTScrollerIcon48.png",
+      "128": "img/autoYTScrollerIcon128.png"
+    },
+    "default_title": "Auto YouTube Shorts Scroller"
+  },
+  
   "icons": {
     "16": "img/autoYTScrollerIcon16.png",
     "48": "img/autoYTScrollerIcon48.png",
     "128": "img/autoYTScrollerIcon128.png"
   },
-  "background": {
-    "scripts": ["./dist/background.js"],
-    "type": "module"
-  },
-  "action": {
-    "default_popup": "./popup/popup.html",
-    "default_icon": "./img/autoYTScrollerIcon128.png",
-    "default_title": "Start scrolling!"
-  },
-  "description": "Automatically scrolls to the next Youtube Short when one ends!"
+  
+  "permissions": [
+    "tabs",
+    "storage"
+  ],
+  
+  "web_accessible_resources": []
 }

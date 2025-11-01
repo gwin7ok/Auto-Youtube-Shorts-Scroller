@@ -4,7 +4,10 @@
     "module": "esnext",
     "lib": ["dom", "dom.iterable", "esnext"],
     "rootDir": "./src",
-    "outDir": "extension/dist"
+    "outDir": "extension/dist",
+    "skipLibCheck": true,
+    "moduleResolution": "node",
+    "noEmitOnError": false
   },
-  "exclude": ["extension/dist"]
+  "exclude": ["extension/dist", "node_modules"]
 }

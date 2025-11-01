@@ -51,6 +51,7 @@ let whitelistedCreators = [];
 let blockedTags = [];
 let scrollOnNoTags = false;
 let additionalScrollDelay = 0;
+let disableLooping = false;
 
 // ------------------------------
 // STATE VARIABLES
@@ -62,6 +63,74 @@ let scrollTimeout: any;
 
 const MAX_RETRIES = 15;
 const RETRY_DELAY_MS = 500;
+
+// ------------------------------
+// LOOP CONTROL FUNCTIONS
+// ------------------------------
+function applyLoopSetting() {
+  const videoElements = document.querySelectorAll('video');
+  videoElements.forEach(video => {
+    if (disableLooping) {
+      // Always remove loop if loop disabling is ON
+      if (video.hasAttribute('loop')) {
+        video.removeAttribute('loop');
+        console.log('[Auto Youtube Shorts Scroller] Loop disabled for video:', video);
+      }
+    } else if (!disableLooping && !video.hasAttribute('loop')) {
+      // Re-enable loop if loop disabling is OFF and video doesn't have loop attribute
+      video.setAttribute('loop', 'true');
+      console.log('[Auto Youtube Shorts Scroller] Loop enabled for video:', video);
+    }
+  });
+}
+
+function startLoopMonitoring() {
+  // Monitor for new video elements being added to the DOM
+  const observer = new MutationObserver((mutations) => {
+    mutations.forEach((mutation) => {
+      if (mutation.type === 'childList') {
+        mutation.addedNodes.forEach((node) => {
+          if (node.nodeType === 1) { // Element node
+            const element = node as Element;
+            // Check if the added element is a video or contains video elements
+            const videos = element.tagName === 'VIDEO' ? [element as HTMLVideoElement] : 
+                          element.querySelectorAll('video');
+            
+            videos.forEach((video: HTMLVideoElement) => {
+              if (disableLooping && video.hasAttribute('loop')) {
+                video.removeAttribute('loop');
+                console.log('[Auto Youtube Shorts Scroller] Loop disabled for new video:', video);
+              }
+            });
+          }
+        });
+      }
+      // Also monitor attribute changes for existing videos
+      if (mutation.type === 'attributes' && 
+          mutation.target.nodeType === 1 && 
+          (mutation.target as Element).tagName === 'VIDEO' && 
+          mutation.attributeName === 'loop') {
+        const video = mutation.target as HTMLVideoElement;
+        if (disableLooping && video.hasAttribute('loop')) {
+          video.removeAttribute('loop');
+          console.log('[Auto Youtube Shorts Scroller] Loop re-disabled for video:', video);
+        }
+      }
+    });
+  });
+
+  observer.observe(document.body, {
+    childList: true,
+    subtree: true,
+    attributes: true,
+    attributeFilter: ['loop']
+  });
+
+  // Apply loop setting to existing videos
+  applyLoopSetting();
+  
+  console.log('[Auto Youtube Shorts Scroller] Loop monitoring started');
+}
 
 // ------------------------------
 // MAIN FUNCTIONS
@@ -80,8 +149,10 @@ function stopAutoScrolling() {
   applicationIsOn = false;
   amountOfPlays = 0;
   if (currentVideoElement) {
-    // Adds back the loop attribute to the video element
-    currentVideoElement.setAttribute("loop", "true");
+    // Only restore loop attribute if loop disabling is OFF
+    if (!disableLooping) {
+      currentVideoElement.setAttribute("loop", "true");
+    }
     currentVideoElement.removeEventListener("ended", shortEnded);
     currentVideoElement._hasEndEvent = false;
   }
@@ -189,9 +260,11 @@ async function checkForNewShort() {
     }
   }
 
-  // Force removal of the loop attribute if it exists
-  if (currentVideoElement?.hasAttribute("loop") && applicationIsOn) {
-    currentVideoElement.removeAttribute("loop");
+  // Force removal of the loop attribute based on settings
+  if (currentVideoElement?.hasAttribute("loop")) {
+    if (applicationIsOn || disableLooping) {
+      currentVideoElement.removeAttribute("loop");
+    }
   }
 }
 
@@ -209,8 +282,14 @@ function shortEnded(e: Event) {
     amountOfPlays = 0;
     scrollToNextShort(currentShortId);
   } else {
-    // Otherwise, play the video again
-    currentVideoElement.play();
+    // Only replay if loop disabling is OFF
+    if (!disableLooping) {
+      currentVideoElement.play();
+    } else {
+      // If loop is disabled, force scroll to next video instead of replaying
+      amountOfPlays = 0;
+      scrollToNextShort(currentShortId);
+    }
   }
 }
 
@@ -242,9 +321,12 @@ async function scrollToNextShort(
   }
 
   if (scrollTimeout) clearTimeout(scrollTimeout);
-  if (additionalScrollDelay > 0 && useDelayAndCheckComments)
-      // If the additional scroll delay is set, wait for it, and allow loop while delaying
-    currentVideoElement.play();
+  if (additionalScrollDelay > 0 && useDelayAndCheckComments) {
+      // If the additional scroll delay is set, only allow replay if loop disabling is OFF
+      if (!disableLooping) {
+        currentVideoElement.play();
+      }
+  }
   scrollTimeout = setTimeout(
       async () => {
         if (prevShortId != null && currentShortId != prevShortId) return; // If the short changed, don't scroll
@@ -520,6 +602,7 @@ async function checkShortValidity(currentShort: HTMLDivElement) {
           "scrollOnNoTags",
           "whitelistedAuthors",
           "additionalScrollDelay",
+          "disableLooping",
         ]
     ).then((result) => {
           console.log("[Auto Youtube Shorts Scroller]", {
@@ -561,7 +644,11 @@ async function checkShortValidity(currentShort: HTMLDivElement) {
           if (result["scrollOnNoTags"]) scrollOnNoTags = result["scrollOnNoTags"];
           if (result["additionalScrollDelay"])
             additionalScrollDelay = result["additionalScrollDelay"];
+          if (result["disableLooping"] !== undefined) 
+            disableLooping = result["disableLooping"];
 
+          // Start loop monitoring for YouTube Shorts
+          startLoopMonitoring();
           shortCutListener();
         }
     );
@@ -639,6 +726,12 @@ async function checkShortValidity(currentShort: HTMLDivElement) {
       if (newAdditionalScrollDelay !== undefined) {
         additionalScrollDelay = newAdditionalScrollDelay;
       }
+      let newDisableLooping = result["disableLooping"]?.newValue;
+      if (newDisableLooping !== undefined) {
+        disableLooping = newDisableLooping;
+        // Apply loop setting to current video immediately
+        applyLoopSetting();
+      }
       if (!(await checkShortValidity(findShortContainer(currentShortId)))) {
         await scrollToNextShort(currentShortId);
       }
@@ -650,7 +743,7 @@ function shortCutListener() {
   let pressedKeys = [];
   // Web Dev Simplifed Debounce
   function debounce(cb: Function, delay: number) {
-    let timeout: number;
+    let timeout: any;
 
     return (...args: any) => {
       clearTimeout(timeout);

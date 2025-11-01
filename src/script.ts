@@ -57,6 +57,9 @@ const scrollOnNoTagsInput = document.querySelector(
 const additionalScrollDelayInput = document.querySelector(
    "#additionalScrollDelayInput"
 ) as HTMLInputElement;
+const disableLoopingInput = document.querySelector(
+   "#disableLoopingInput"
+) as HTMLInputElement;
 
 // Navigation Elements
 const navItems = document.querySelectorAll(".nav-item");
@@ -215,6 +218,10 @@ function setupEventListeners() {
       "change",
       handleCheckboxChange("scrollOnNoTags")
    );
+   disableLoopingInput.addEventListener(
+      "change",
+      handleCheckboxChange("disableLooping")
+   );
 
    // Listen for storage changes to update UI (especially the master toggle)
    browser.storage.onChanged.addListener((changes) => {
@@ -330,6 +337,7 @@ function getAllSettingsForPopup() {
       "scrollOnComments",
       "scrollOnNoTags",
       "additionalScrollDelay",
+      "disableLooping",
    ];
 
    browser.storage.local.get(keysToGet).then((result) => {
@@ -395,6 +403,7 @@ function getAllSettingsForPopup() {
       ).toString();
       scrollOnCommentsInput.checked = result.scrollOnComments ?? false; // Default to false
       scrollOnNoTagsInput.checked = result.scrollOnNoTags ?? false; // Default to false
+      disableLoopingInput.checked = result.disableLooping ?? false; // Default to false
 
       // Initialize default values in storage if they were undefined
       const defaultsToSet = {} as {
@@ -417,6 +426,7 @@ function getAllSettingsForPopup() {
          scrollOnComments: boolean;
          scrollOnNoTags: boolean;
          additionalScrollDelay: number;
+         disableLooping: boolean;
       };
       if (result.applicationIsOn === undefined)
          defaultsToSet.applicationIsOn = true;
@@ -456,6 +466,8 @@ function getAllSettingsForPopup() {
          defaultsToSet.scrollOnNoTags = false;
       if (result.additionalScrollDelay === undefined)
          defaultsToSet.additionalScrollDelay = 0;
+      if (result.disableLooping === undefined)
+         defaultsToSet.disableLooping = false;
 
       if (Object.keys(defaultsToSet).length > 0) {
          browser.storage.local.set(defaultsToSet);

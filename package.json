@@ -1,10 +1,19 @@
 {
   "name": "auto_youtube_shorts_scroller",
+  "version": "3.1.3",
   "scripts": {
-    "build": "tsc && mkdir -p extension/dist && mv ./dist/* ./extension/dist/"
+    "build": "tsc",
+    "build:xpi": "npm run build && web-ext build --source-dir=extension --artifacts-dir=build --overwrite-dest && powershell -Command \"Copy-Item 'build\\auto_youtube_shorts_scroller-3.1.3.zip' 'build\\auto-youtube-shorts-scroller.xpi' -Force\"",
+    "build:zip": "npm run build && powershell -Command \"New-Item -ItemType Directory -Force -Path build | Out-Null; Compress-Archive -Path 'extension\\*' -DestinationPath 'build\\auto-youtube-shorts-scroller.zip' -Force\"",
+    "package": "npm run build:xpi",
+    "lint": "web-ext lint --source-dir=extension"
   },
   "dependencies": {
     "@types/firefox-webext-browser": "^120.0.4",
     "typescript": "^4.0.3"
+  },
+  "devDependencies": {
+    "cross-env": "^10.1.0",
+    "web-ext": "^8.10.0"
   }
 }
