@@ -836,8 +836,7 @@ async function checkShortValidity(currentShort: HTMLDivElement) {
       shortCutListener();
       // Add navigation key interception for switching shorts with next/previous video keys
       navKeyShortsListener();
-      // Inject page-context bridge so we can call site-internal APIs from page context
-      try { injectPageScript(); } catch (err) { }
+      // Page-context injection removed (not needed for volume persistence)
     }
     );
     browser.storage.onChanged.addListener(async (result) => {
@@ -1104,39 +1103,14 @@ function onVolumeChange(e: Event) {
     try { setVolumeViaUI(v); } catch (err) { }
     try { setUnderlyingVolume(v); } catch (err) { }
     try {
-      // Dispatch to page context bridge so it can use internal APIs
-      const ev = new CustomEvent('AutoYT_SetVolume', { detail: { volume: v } });
-      document.dispatchEvent(ev);
+      // page-context bridge removed — we no longer inject page scripts.
     } catch (err) { }
   } catch (err) {
     // swallow
   }
 }
 
-// Inject a script into the page context that listens for `AutoYT_SetVolume` events
-// and attempts to call site-internal APIs / update page-level persisted settings.
-function injectPageScript() {
-  try {
-    const script = document.createElement('script');
-    script.setAttribute('data-autoyt-injected', '1');
-    const getUrl = () => {
-      try {
-        // prefer chrome runtime if available
-        const anyWin: any = window as any;
-        if (anyWin.chrome && anyWin.chrome.runtime && typeof anyWin.chrome.runtime.getURL === 'function') return anyWin.chrome.runtime.getURL('inject-page.js');
-        if (anyWin.browser && anyWin.browser.runtime && typeof anyWin.browser.runtime.getURL === 'function') return anyWin.browser.runtime.getURL('inject-page.js');
-      } catch (err) { }
-      return 'inject-page.js';
-    };
-    script.src = getUrl();
-    script.async = false;
-    (document.head || document.documentElement).appendChild(script);
-    // keep script in DOM for a while; removing it immediately may prevent execution on some pages
-    setTimeout(function () { try { script.parentNode && script.parentNode.removeChild(script); } catch (e) { } }, 30000);
-  } catch (err) {
-    // ignore injection errors
-  }
-}
+// Page injection removed: no page-context script will be added.
 
 // Attempt to mimic dragging the page's volume slider so YouTube's own
 // UI/player state is updated the same way as a mouse drag would.
@@ -1180,21 +1154,7 @@ function setVolumeViaUI(volume: number) {
         }
       }
     }
-
-    if (!range) {
-      const all = Array.from(document.querySelectorAll('input[type="range"]')) as HTMLInputElement[];
-      for (const r of all) {
-        const rect = r.getBoundingClientRect();
-        if (rect.width > 0 && rect.height > 0 && r.offsetParent !== null) {
-          range = r;
-          break;
-        }
-      }
-    }
-
-    if (!range) return false;
-
-    const min = parseFloat(range.min as any) || 0;
+    const min = parseFloat(range!.min as any) || 0;
     const max = parseFloat(range.max as any) || 100;
     const targetValue = (max <= 1 ? v : Math.round(min + (max - min) * v)).toString();
 

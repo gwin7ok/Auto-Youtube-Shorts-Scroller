@@ -26,16 +26,6 @@
     "tabs",
     "storage"
   ],
-  "web_accessible_resources": [
-    {
-      "resources": [
-        "inject-page.js"
-      ],
-      "matches": [
-        "<all_urls>"
-      ]
-    }
-  ],
   "action": {
     "default_popup": "popup/popup.html",
     "default_icon": {
