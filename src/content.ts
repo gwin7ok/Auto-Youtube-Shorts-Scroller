@@ -789,6 +789,8 @@ async function checkShortValidity(currentShort: HTMLDivElement) {
       // Start loop monitoring for YouTube Shorts
       startLoopMonitoring();
       shortCutListener();
+      // Add navigation key interception for switching shorts with next/previous video keys
+      navKeyShortsListener();
     }
     );
     browser.storage.onChanged.addListener(async (result) => {
@@ -951,6 +953,85 @@ function shortCutListener() {
     }
     pressedKeys = [];
   });
+}
+
+// Intercept common "next/previous video" keyboard shortcuts and map them
+// to scrolling between Shorts when on a Shorts page. Runs in capture phase
+// to try to stop YouTube's default handlers.
+function navKeyShortsListener() {
+  async function manualScrollToOffset(offset: number) {
+    try {
+      if (!isShortsPage()) return;
+
+      // Find target short container by index
+      const target = findShortContainer((currentShortId || 0) + offset);
+
+      if (!target) {
+        // If not found, try to wait for next/prev to load by reusing waitForNextShort
+        const origDir = scrollDirection;
+        scrollDirection = offset > 0 ? 1 : -1;
+        const nextShort = await waitForNextShort();
+        scrollDirection = origDir;
+        if (!nextShort) return;
+        nextShort.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "start" });
+        checkForNewShort();
+        return;
+      }
+
+      // Remove end listener from previous video element if present
+      if (currentVideoElement) {
+        try {
+          currentVideoElement.removeEventListener("ended", shortEnded);
+          currentVideoElement._hasEndEvent = false;
+        } catch (err) { }
+      }
+
+      target.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "start" });
+      checkForNewShort();
+    } catch (err) {
+      console.error("[Auto Youtube Shorts Scroller] navKey manual scroll error", err);
+    }
+  }
+
+  document.addEventListener(
+    "keydown",
+    (e: KeyboardEvent) => {
+      try {
+        if (!isShortsPage()) return;
+
+        // Common shortcuts: Shift+N (next), Shift+P (previous)
+        if (e.shiftKey && e.key && e.key.toLowerCase() === "n") {
+          e.preventDefault();
+          e.stopImmediatePropagation();
+          manualScrollToOffset(1);
+          return;
+        }
+        if (e.shiftKey && e.key && e.key.toLowerCase() === "p") {
+          e.preventDefault();
+          e.stopImmediatePropagation();
+          manualScrollToOffset(-1);
+          return;
+        }
+
+        // Media keys
+        if (e.key === "MediaTrackNext" || e.key === "MediaNextTrack") {
+          e.preventDefault();
+          e.stopImmediatePropagation();
+          manualScrollToOffset(1);
+          return;
+        }
+        if (e.key === "MediaTrackPrevious" || e.key === "MediaPreviousTrack") {
+          e.preventDefault();
+          e.stopImmediatePropagation();
+          manualScrollToOffset(-1);
+          return;
+        }
+      } catch (err) {
+        // swallow
+      }
+    },
+    true // capture phase
+  );
 }
 
 function isShortsPage() {
