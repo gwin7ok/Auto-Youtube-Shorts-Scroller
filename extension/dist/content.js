@@ -43,7 +43,6 @@ let blockedTags = [];
 let scrollOnNoTags = false;
 let additionalScrollDelay = 0;
 let disableLooping = false;
-let lastVolume = null;
 // ------------------------------
 // STATE VARIABLES
 // ------------------------------
@@ -168,11 +167,6 @@ function stopAutoScrolling() {
         }
         currentVideoElement.removeEventListener("ended", shortEnded);
         currentVideoElement._hasEndEvent = false;
-        try {
-            currentVideoElement.removeEventListener("volumechange", onVolumeChange);
-            currentVideoElement._hasVolumeEvent = false;
-        }
-        catch (err) { }
     }
 }
 async function checkForNewShort() {
@@ -192,8 +186,6 @@ async function checkForNewShort() {
             try {
                 previousShort.removeEventListener("ended", shortEnded);
                 previousShort._hasEndEvent = false;
-                previousShort.removeEventListener("volumechange", onVolumeChange);
-                previousShort._hasVolumeEvent = false;
             }
             catch (err) { }
         }
@@ -245,43 +237,6 @@ async function checkForNewShort() {
         console.log("[Auto Youtube Shorts Scroller] Adding event listener to video element...", currentVideoElement);
         currentVideoElement.addEventListener("ended", shortEnded);
         currentVideoElement._hasEndEvent = true;
-        // Attach volumechange listener so keyboard/mouse adjustments are persisted
-        try {
-            if (!currentVideoElement._hasVolumeEvent) {
-                currentVideoElement.addEventListener("volumechange", onVolumeChange);
-                currentVideoElement._hasVolumeEvent = true;
-            }
-            // If we have a previously stored volume, apply it to the new element
-            if (lastVolume != null) {
-                // Apply immediately and schedule retries in case YouTube overwrites the value
-                try {
-                    currentVideoElement.volume = lastVolume;
-                }
-                catch (err) { }
-                try {
-                    setUnderlyingVolume(lastVolume);
-                }
-                catch (err) { }
-                // retries: try again after short delays to survive site resets
-                [150, 400, 800, 1600].forEach((delay) => {
-                    setTimeout(() => {
-                        try {
-                            if (!currentVideoElement)
-                                return;
-                            currentVideoElement.volume = lastVolume;
-                            try {
-                                setUnderlyingVolume(lastVolume);
-                            }
-                            catch (err) { }
-                        }
-                        catch (err) { }
-                    }, delay);
-                });
-            }
-        }
-        catch (err) {
-            // ignore
-        }
         // Check if the current short has metadata
         const isMetaDataHydrated = (selector) => {
             return currentShort?.querySelector(selector) != null;
@@ -413,8 +368,6 @@ async function scrollToNextShort(prevShortId = null, useDelayAndCheckComments = 
             try {
                 currentVideoElement.removeEventListener("ended", shortEnded);
                 currentVideoElement._hasEndEvent = false;
-                currentVideoElement.removeEventListener("volumechange", onVolumeChange);
-                currentVideoElement._hasVolumeEvent = false;
             }
             catch (err) { }
         }
@@ -699,7 +652,6 @@ async function checkShortValidity(currentShort) {
             "whitelistedAuthors",
             "additionalScrollDelay",
             "disableLooping",
-            "lastVolume",
         ]).then((result) => {
             console.log("[Auto Youtube Shorts Scroller]", {
                 AutoYTScrollerSettings: result,
@@ -746,9 +698,6 @@ async function checkShortValidity(currentShort) {
                 additionalScrollDelay = result["additionalScrollDelay"];
             if (result["disableLooping"] !== undefined)
                 disableLooping = result["disableLooping"];
-            if (result["lastVolume"] !== undefined && result["lastVolume"] !== null) {
-                lastVolume = parseFloat(result["lastVolume"]);
-            }
             // Start loop monitoring for YouTube Shorts
             startLoopMonitoring();
             shortCutListener();
@@ -837,15 +786,6 @@ async function checkShortValidity(currentShort) {
                 disableLooping = newDisableLooping;
                 // Apply loop setting to current video immediately
                 applyLoopSetting();
-            }
-            let newLastVolume = result["lastVolume"]?.newValue;
-            if (newLastVolume !== undefined && newLastVolume !== null) {
-                lastVolume = parseFloat(newLastVolume);
-                try {
-                    if (currentVideoElement)
-                        currentVideoElement.volume = lastVolume;
-                }
-                catch (err) { }
             }
             if (!(await checkShortValidity(findShortContainer(currentShortId)))) {
                 await scrollToNextShort(currentShortId);
@@ -995,128 +935,7 @@ function navKeyShortsListener() {
     }, true // capture phase
     );
 }
-function onVolumeChange(e) {
-    try {
-        const video = e.target;
-        if (!video)
-            return;
-        const v = typeof video.volume === 'number' ? video.volume : 0;
-        if (lastVolume != null && Math.abs(v - lastVolume) < 0.001)
-            return;
-        lastVolume = v;
-        try {
-            browser.storage.local.set({ lastVolume: v });
-        }
-        catch (err) {
-            // ignore
-        }
-        // Persist volume to underlying storage so it survives navigation
-        try {
-            setUnderlyingVolume(v);
-        }
-        catch (err) { }
-    }
-    catch (err) {
-        // swallow
-    }
-}
-// Page injection removed: no page-context script will be added.
-// Attempt to mimic dragging the page's volume slider so YouTube's own
-// UI/player state is updated the same way as a mouse drag would.
-// Volume slider UI simulation removed — we persist volume by setting the
-// `video.volume` and updating underlying storage via `setUnderlyingVolume()`.
-// Try to update underlying storage entries that may contain saved volume values
-// so that site-level persisted settings reflect the change.
-function setUnderlyingVolume(volume) {
-    try {
-        const v = Math.max(0, Math.min(1, Number(volume) || 0));
-        // Inspect localStorage keys and attempt safe updates for likely volume entries
-        try {
-            const keys = Object.keys(window.localStorage || {});
-            for (const key of keys) {
-                try {
-                    const lower = key.toLowerCase();
-                    // Heuristic: only touch keys that look related to volume/player
-                    if (!/vol|volume|player|yt-player|ytplayer|ytcfg|pref/.test(lower))
-                        continue;
-                    const raw = window.localStorage.getItem(key);
-                    if (raw == null)
-                        continue;
-                    let newValue = null;
-                    // Try JSON parse and recursively replace numeric/string "volume" fields
-                    try {
-                        const parsed = JSON.parse(raw);
-                        let mutated = false;
-                        function walk(obj) {
-                            if (!obj || typeof obj !== 'object')
-                                return;
-                            for (const k of Object.keys(obj)) {
-                                try {
-                                    const val = obj[k];
-                                    if (typeof val === 'number' && /vol|volume/i.test(k)) {
-                                        obj[k] = val <= 1 ? v : Math.round(v * 100);
-                                        mutated = true;
-                                    }
-                                    else if (typeof val === 'string' && /vol|volume/i.test(k)) {
-                                        const n = parseFloat(val);
-                                        if (!isNaN(n)) {
-                                            obj[k] = n <= 1 ? String(v) : String(Math.round(v * 100));
-                                            mutated = true;
-                                        }
-                                    }
-                                    else if (typeof val === 'object') {
-                                        walk(val);
-                                    }
-                                }
-                                catch (err) {
-                                    continue;
-                                }
-                            }
-                        }
-                        walk(parsed);
-                        if (mutated)
-                            newValue = JSON.stringify(parsed);
-                    }
-                    catch (err) {
-                        // not JSON
-                    }
-                    // If not JSON-updated, try direct numeric value update
-                    if (newValue == null) {
-                        const num = parseFloat(raw);
-                        if (!isNaN(num)) {
-                            // scale according to observed range (<=1 treat as 0..1, else 0..100)
-                            newValue = num <= 1 ? String(v) : String(Math.round(v * 100));
-                        }
-                    }
-                    if (newValue != null && newValue !== raw) {
-                        try {
-                            window.localStorage.setItem(key, newValue);
-                        }
-                        catch (err) {
-                            // ignore write errors
-                        }
-                    }
-                }
-                catch (err) {
-                    continue;
-                }
-            }
-        }
-        catch (err) {
-            // ignore localStorage enumeration errors
-        }
-        // Also attempt to set cookies (PREF) as a fallback (do not overwrite unrelated prefs)
-        try {
-            // Many YouTube settings live in cookies (PREF). We don't touch the whole cookie,
-            // but if an explicit volume cookie key is known it could be updated here.
-        }
-        catch (err) { }
-        return true;
-    }
-    catch (err) {
-        return false;
-    }
-}
+// Volume handling code removed per user instruction.
 function isShortsPage() {
     let containsShortElements = false;
     const doesPageHaveAShort = document.querySelector(VIDEOS_LIST_SELECTORS.join(","));
