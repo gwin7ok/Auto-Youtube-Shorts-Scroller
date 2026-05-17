@@ -61,8 +61,37 @@ let currentVideoElement = null;
 let applicationIsOn = false;
 let scrollTimeout: any;
 
+// Diagnostic global error handler: log context when uncaught errors occur
+// Helps identify which `querySelector` call is hitting a null object.
+window.addEventListener("error", (ev: ErrorEvent) => {
+  try {
+    console.log("[Auto Youtube Shorts Scroller] Global error captured", {
+      message: ev.message,
+      filename: ev.filename,
+      lineno: ev.lineno,
+      colno: ev.colno,
+      stack: ev.error?.stack,
+      currentShortId,
+      // snapshot the container node (may be null)
+      currentShortSnapshot: (() => {
+        try {
+          return findShortContainer(currentShortId);
+        } catch (e) {
+          return null;
+        }
+      })(),
+      currentVideoElement,
+    });
+  } catch (err) {
+    // swallow logging errors to avoid loops
+  }
+});
+
 const MAX_RETRIES = 15;
 const RETRY_DELAY_MS = 500;
+// If metadata isn't hydrated within retries, but video is playing,
+// wait for video `ended` or this fallback timeout before forcing scroll.
+const METADATA_FALLBACK_MS = 30_000; // 30 seconds
 
 // ------------------------------
 // LOOP CONTROL FUNCTIONS
@@ -175,19 +204,35 @@ async function checkForNewShort() {
       previousShort._hasEndEvent = false;
     }
 
-    // Set the new current short id and video element
-    currentShortId = parseInt(currentShort.id);
-    currentVideoElement = currentShort.querySelector("video");
+    // Set the new current short id and video element.
+    // Prefer the index of the short in the current DOM list (more stable
+    // than relying on the element's `id` attribute which can be missing
+    // or non-numeric).
+    let shortsList: HTMLDivElement[] = [];
+    for (let i = 0; i < VIDEOS_LIST_SELECTORS.length; i++) {
+      const list = Array.from(document.querySelectorAll(VIDEOS_LIST_SELECTORS[i])) as HTMLDivElement[];
+      if (list.length > 0) {
+        shortsList = list;
+        break;
+      }
+    }
+    const foundIndex = shortsList.length > 0 ? shortsList.findIndex((s) => s === currentShort) : -1;
+    if (foundIndex >= 0) {
+      currentShortId = foundIndex;
+    } else {
+      const parsed = parseInt((currentShort.id || "").toString());
+      currentShortId = isNaN(parsed) ? 0 : parsed;
+    }
+    currentVideoElement = currentShort?.querySelector("video");
 
     // Looping check if the current short has a video element
     if (currentVideoElement == null) {
       let l = 0;
       while (currentVideoElement == null) {
-        currentVideoElement = currentShort.querySelector("video");
+        currentVideoElement = currentShort?.querySelector("video");
         if (l > MAX_RETRIES) {
           // If the video element is not found, scroll to the next short
           let prevShortId = currentShortId;
-          currentShortId = null;
           console.log(
             "[Auto Youtube Shorts Scroller] Video element not found, scrolling to next short..."
           );
@@ -200,8 +245,8 @@ async function checkForNewShort() {
 
     // Check if the current short is an ad
     if (
-      currentShort.querySelector("ytd-ad-slot-renderer") ||
-      currentShort.querySelector("ad-button-view-model")
+      currentShort?.querySelector("ytd-ad-slot-renderer") ||
+      currentShort?.querySelector("ad-button-view-model")
     ) {
       console.log(
         "[Auto Youtube Shorts Scroller] Ad detected..., scrolling to next short..."
@@ -227,7 +272,7 @@ async function checkForNewShort() {
 
     // Check if the current short has metadata
     const isMetaDataHydrated = (selector: string) => {
-      return currentShort.querySelector(selector) != null;
+      return currentShort?.querySelector(selector) != null;
     };
 
     if (!isMetaDataHydrated(AUTHOUR_NAME_SELECTOR)) {
@@ -236,13 +281,28 @@ async function checkForNewShort() {
       while (!isMetaDataHydrated(AUTHOUR_NAME_SELECTOR)) {
         if (isMetaDataHydrated(AUTHOUR_NAME_SELECTOR_2)) break;
         if (l > MAX_RETRIES) {
-          // If after time not found, scroll to next short
-          let prevShortId = currentShortId;
-          currentShortId = null;
+          // If after retries metadata still not hydrated, do NOT force scroll.
+          // If video is playing, wait for its natural `ended` event to trigger
+          // the normal scroll behavior. If not playing, simply give up for
+          // now and let periodic checks re-evaluate — do not navigate.
+          try {
+            const vid = currentVideoElement as any;
+            const isPlaying = vid && typeof vid.currentTime === "number" && !vid.ended && !vid.paused;
+            if (isPlaying) {
+              console.log(
+                "[Auto Youtube Shorts Scroller] Metadata not hydrated, video playing — waiting for natural end (no forced scroll).",
+                vid
+              );
+              return; // wait for `ended` to handle navigation
+            }
+          } catch (err) {
+            // ignore and continue to not force scroll
+          }
+
           console.log(
-            "[Auto Youtube Shorts Scroller] Metadata not hydrated, scrolling to next short..."
+            "[Auto Youtube Shorts Scroller] Metadata not hydrated after retries — not forcing scroll."
           );
-          return scrollToNextShort(prevShortId, false);
+          return; // do not force scroll
         }
         await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS));
         l++;
@@ -257,6 +317,28 @@ async function checkForNewShort() {
         "[Auto Youtube Shorts Scroller] Short doesn't meet the filter settings, scrolling to next short..."
       );
       return scrollToNextShort(currentShortId, true);
+    }
+  }
+
+  else {
+    // If the short hasn't changed, ensure we still have a valid video element
+    // and that the ended listener is attached (covers cases where the
+    // video element was replaced or the listener was removed).
+    try {
+      const videoEl = currentShort?.querySelector("video");
+      if (videoEl) {
+        if (currentVideoElement !== videoEl) currentVideoElement = videoEl;
+        if (!currentVideoElement._hasEndEvent) {
+          console.log(
+            "[Auto Youtube Shorts Scroller] Re-attaching event listener to video element...",
+            currentVideoElement
+          );
+          currentVideoElement.addEventListener("ended", shortEnded);
+          currentVideoElement._hasEndEvent = true;
+        }
+      }
+    } catch (err) {
+      // Ignore any errors during re-attachment
     }
   }
 
@@ -426,6 +508,50 @@ async function waitForNextShort(retries = 5, delay = 500) {
   return null;
 }
 
+// Wait for metadata to be hydrated inside the provided short container.
+// Uses a MutationObserver to detect insertion of author/channel elements
+// and resolves true when found. Resolves false if the short is removed
+// from the document (prevents hanging when the short changes).
+async function waitForMetadata(currentShort: HTMLDivElement): Promise<boolean> {
+  if (!currentShort) return false;
+
+  const hasMetadata = () => {
+    try {
+      return (
+        !!currentShort?.querySelector(AUTHOUR_NAME_SELECTOR) ||
+        !!currentShort?.querySelector(AUTHOUR_NAME_SELECTOR_2)
+      );
+    } catch (err) {
+      return false;
+    }
+  };
+
+  if (hasMetadata()) return true;
+
+  return new Promise<boolean>((resolve) => {
+    const observer = new MutationObserver(() => {
+      if (hasMetadata()) {
+        observer.disconnect();
+        resolve(true);
+        return;
+      }
+      // If the short has been removed from the document, stop waiting
+      if (!document.contains(currentShort)) {
+        observer.disconnect();
+        resolve(false);
+        return;
+      }
+    });
+
+    try {
+      observer.observe(currentShort, { childList: true, subtree: true });
+    } catch (err) {
+      // If observe fails (unexpected), avoid hanging
+      resolve(false);
+    }
+  });
+}
+
 async function checkShortValidity(currentShort: HTMLDivElement) {
   const videoLength = currentVideoElement?.duration;
   const viewCount = document.querySelector(
@@ -436,7 +562,7 @@ async function checkShortValidity(currentShort: HTMLDivElement) {
   ) as HTMLSpanElement;
   const commentCount =
     currentShort &&
-    (currentShort.querySelector(
+    (currentShort?.querySelector(
       COMMENTS_COUNT_SELECTORS.join(",")
     ) as HTMLSpanElement);
   const tags = document.querySelectorAll(
@@ -444,8 +570,8 @@ async function checkShortValidity(currentShort: HTMLDivElement) {
   ) as NodeListOf<HTMLAnchorElement>;
   const creatorName =
     currentShort &&
-    ((currentShort.querySelector(AUTHOUR_NAME_SELECTOR) ||
-      currentShort.querySelector(
+    ((currentShort?.querySelector(AUTHOUR_NAME_SELECTOR) ||
+      currentShort?.querySelector(
         AUTHOUR_NAME_SELECTOR_2
       )) as HTMLAnchorElement);
 
