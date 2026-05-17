@@ -288,17 +288,14 @@ async function checkForNewShort() {
       if (lastVolume != null) {
         // Apply immediately and schedule retries in case YouTube overwrites the value
         try { currentVideoElement.volume = lastVolume; } catch (err) { }
-        try { setVolumeViaUI(lastVolume); } catch (err) { }
         try { setUnderlyingVolume(lastVolume); } catch (err) { }
-        try { document.dispatchEvent(new CustomEvent('AutoYT_SetVolume', { detail: { volume: lastVolume } })); } catch (err) { }
         // retries: try again after short delays to survive site resets
         [150, 400, 800, 1600].forEach((delay) => {
           setTimeout(() => {
             try {
               if (!currentVideoElement) return;
               currentVideoElement.volume = lastVolume as number;
-              try { setVolumeViaUI(lastVolume as number); } catch (err) { }
-              try { document.dispatchEvent(new CustomEvent('AutoYT_SetVolume', { detail: { volume: lastVolume } })); } catch (err) { }
+              try { setUnderlyingVolume(lastVolume as number); } catch (err) { }
             } catch (err) { }
           }, delay);
         });
@@ -1099,12 +1096,8 @@ function onVolumeChange(e: Event) {
     } catch (err) {
       // ignore
     }
-    // Try to mirror change into the page UI (slider) so YouTube persists it like a mouse drag
-    try { setVolumeViaUI(v); } catch (err) { }
+    // Persist volume to underlying storage so it survives navigation
     try { setUnderlyingVolume(v); } catch (err) { }
-    try {
-      // page-context bridge removed — we no longer inject page scripts.
-    } catch (err) { }
   } catch (err) {
     // swallow
   }
@@ -1114,75 +1107,8 @@ function onVolumeChange(e: Event) {
 
 // Attempt to mimic dragging the page's volume slider so YouTube's own
 // UI/player state is updated the same way as a mouse drag would.
-function setVolumeViaUI(volume: number) {
-  try {
-    const v = Math.max(0, Math.min(1, Number(volume) || 0));
-
-    // Apply to any current video element immediately
-    const vid = currentVideoElement || (document.querySelector('video') as HTMLVideoElement);
-    if (vid) {
-      try { vid.volume = v; } catch (err) { }
-    }
-
-    const selectors = [
-      'input[type="range"][aria-label*="Volume"]',
-      'input[type="range"][aria-label*="音量"]',
-      'input[type="range"][role="slider"]',
-      'input[type="range"]',
-      '.ytp-volume-slider',
-    ];
-
-    let range: HTMLInputElement | null = null;
-    for (const sel of selectors) {
-      const el = document.querySelector(sel);
-      if (!el) continue;
-      if (el instanceof HTMLInputElement) {
-        const rect = el.getBoundingClientRect();
-        if (rect.width > 0 && rect.height > 0 && el.offsetParent !== null) {
-          range = el as HTMLInputElement;
-          break;
-        }
-      } else {
-        // If selector is a container, look for input inside
-        const inner = (el as Element).querySelector('input[type="range"]') as HTMLInputElement;
-        if (inner) {
-          const rect = inner.getBoundingClientRect();
-          if (rect.width > 0 && rect.height > 0 && inner.offsetParent !== null) {
-            range = inner;
-            break;
-          }
-        }
-      }
-    }
-    const min = parseFloat(range!.min as any) || 0;
-    const max = parseFloat(range.max as any) || 100;
-    const targetValue = (max <= 1 ? v : Math.round(min + (max - min) * v)).toString();
-
-    // Set the input's value and dispatch events so the page reacts like a user action
-    try {
-      range.value = targetValue;
-      range.dispatchEvent(new Event('input', { bubbles: true }));
-      range.dispatchEvent(new Event('change', { bubbles: true }));
-    } catch (err) { }
-
-    // Also try pointer events (simulate drag) for listeners that use them
-    try {
-      const rect = range.getBoundingClientRect();
-      const numericValue = parseFloat(range.value as any) || 0;
-      const ratio = (numericValue - min) / (max - min || 1);
-      const clientX = rect.left + rect.width * ratio;
-      const clientY = rect.top + rect.height / 2;
-      range.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, clientX, clientY }));
-      range.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, clientX, clientY }));
-      range.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, clientX, clientY }));
-    } catch (err) { }
-
-    return true;
-  } catch (err) {
-    console.error('[Auto Youtube Shorts Scroller] setVolumeViaUI error', err);
-    return false;
-  }
-}
+// Volume slider UI simulation removed — we persist volume by setting the
+// `video.volume` and updating underlying storage via `setUnderlyingVolume()`.
 
 // Try to update underlying storage entries that may contain saved volume values
 // so that site-level persisted settings reflect the change.
