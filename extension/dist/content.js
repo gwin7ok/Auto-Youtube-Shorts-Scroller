@@ -1,0 +1,947 @@
+// ------------------------------
+// CONSTANT SELECTORS VARIABLES
+// ------------------------------
+const VIDEOS_LIST_SELECTORS = [
+    ".reel-video-in-sequence",
+    ".reel-video-in-sequence-new",
+];
+const CURRENT_SHORT_SELECTOR = "ytd-reel-video-renderer";
+const LIKE_BUTTON_SELECTOR = "#like-button button";
+const DISLIKE_BUTTON_SELECTOR = "#dislike-button button";
+const COMMENTS_SELECTOR = "ytd-engagement-panel-section-list-renderer[target-id='engagement-panel-comments-section']";
+const LIKES_COUNT_SELECTOR = "#factoids > factoid-renderer:nth-child(1) > div > span.ytwFactoidRendererValue > span";
+const VIEW_COUNT_SELECTOR = "#factoids > view-count-factoid-renderer > factoid-renderer > div > span.ytwFactoidRendererValue > span";
+const COMMENTS_COUNT_SELECTORS = [
+    "#comments-button > ytd-button-renderer > yt-button-shape > label > div > span",
+    "#button-bar > reel-action-bar-view-model > button-view-model:nth-of-type(1) > label > div > span",
+];
+const DESCRIPTION_TAGS_SELECTOR = "#title > yt-formatted-string > a";
+const AUTHOUR_NAME_SELECTOR = "#metapanel > yt-reel-metapanel-view-model > div:nth-child(1) > yt-reel-channel-bar-view-model > span > a";
+const AUTHOUR_NAME_SELECTOR_2 = "#metapanel > yt-reel-metapanel-view-model > div:nth-child(2) > yt-reel-channel-bar-view-model > span > a";
+const NEXT_BUTTON_SELECTOR = "#navigation-button-down > ytd-button-renderer > yt-button-shape > button";
+const PREVIOUS_BUTTON_SELECTOR = "#navigation-button-up > ytd-button-renderer > yt-button-shape > button";
+// ------------------------------
+// APP VARIABLES
+// ------------------------------
+let shortCutToggleKeys = [];
+let shortCutInteractKeys = [];
+let scrollOnCommentsCheck = false;
+let scrollDirection = 1;
+let amountOfPlays = 0;
+let amountOfPlaysToSkip = 1;
+let filterMinLength = "none";
+let filterMaxLength = "none";
+let filterMinViews = "none";
+let filterMaxViews = "none";
+let filterMinLikes = "none";
+let filterMaxLikes = "none";
+let filterMinComments = "none";
+let filterMaxComments = "none";
+let blockedCreators = [];
+let whitelistedCreators = [];
+let blockedTags = [];
+let scrollOnNoTags = false;
+let additionalScrollDelay = 0;
+let disableLooping = false;
+// ------------------------------
+// STATE VARIABLES
+// ------------------------------
+let currentShortId = null;
+let currentVideoElement = null;
+let applicationIsOn = false;
+let scrollTimeout;
+// Diagnostic global error handler: log context when uncaught errors occur
+// Helps identify which `querySelector` call is hitting a null object.
+window.addEventListener("error", (ev) => {
+    try {
+        console.log("[Auto Youtube Shorts Scroller] Global error captured", {
+            message: ev.message,
+            filename: ev.filename,
+            lineno: ev.lineno,
+            colno: ev.colno,
+            stack: ev.error?.stack,
+            currentShortId,
+            // snapshot the container node (may be null)
+            currentShortSnapshot: (() => {
+                try {
+                    return findShortContainer(currentShortId);
+                }
+                catch (e) {
+                    return null;
+                }
+            })(),
+            currentVideoElement,
+        });
+    }
+    catch (err) {
+        // swallow logging errors to avoid loops
+    }
+});
+const MAX_RETRIES = 15;
+const RETRY_DELAY_MS = 500;
+// If metadata isn't hydrated within retries, but video is playing,
+// wait for video `ended` or this fallback timeout before forcing scroll.
+const METADATA_FALLBACK_MS = 30_000; // 30 seconds
+// ------------------------------
+// LOOP CONTROL FUNCTIONS
+// ------------------------------
+function applyLoopSetting() {
+    const videoElements = document.querySelectorAll('video');
+    videoElements.forEach(video => {
+        if (disableLooping) {
+            // Always remove loop if loop disabling is ON
+            if (video.hasAttribute('loop')) {
+                video.removeAttribute('loop');
+                console.log('[Auto Youtube Shorts Scroller] Loop disabled for video:', video);
+            }
+        }
+        else if (!disableLooping && !video.hasAttribute('loop')) {
+            // Re-enable loop if loop disabling is OFF and video doesn't have loop attribute
+            video.setAttribute('loop', 'true');
+            console.log('[Auto Youtube Shorts Scroller] Loop enabled for video:', video);
+        }
+    });
+}
+function startLoopMonitoring() {
+    // Monitor for new video elements being added to the DOM
+    const observer = new MutationObserver((mutations) => {
+        mutations.forEach((mutation) => {
+            if (mutation.type === 'childList') {
+                mutation.addedNodes.forEach((node) => {
+                    if (node.nodeType === 1) { // Element node
+                        const element = node;
+                        // Check if the added element is a video or contains video elements
+                        const videos = element.tagName === 'VIDEO' ? [element] :
+                            element.querySelectorAll('video');
+                        videos.forEach((video) => {
+                            if (disableLooping && video.hasAttribute('loop')) {
+                                video.removeAttribute('loop');
+                                console.log('[Auto Youtube Shorts Scroller] Loop disabled for new video:', video);
+                            }
+                        });
+                    }
+                });
+            }
+            // Also monitor attribute changes for existing videos
+            if (mutation.type === 'attributes' &&
+                mutation.target.nodeType === 1 &&
+                mutation.target.tagName === 'VIDEO' &&
+                mutation.attributeName === 'loop') {
+                const video = mutation.target;
+                if (disableLooping && video.hasAttribute('loop')) {
+                    video.removeAttribute('loop');
+                    console.log('[Auto Youtube Shorts Scroller] Loop re-disabled for video:', video);
+                }
+            }
+        });
+    });
+    observer.observe(document.body, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+        attributeFilter: ['loop']
+    });
+    // Apply loop setting to existing videos
+    applyLoopSetting();
+    console.log('[Auto Youtube Shorts Scroller] Loop monitoring started');
+}
+// ------------------------------
+// MAIN FUNCTIONS
+// ------------------------------
+function startAutoScrolling() {
+    if (!applicationIsOn) {
+        applicationIsOn = true;
+        amountOfPlays = 0;
+        currentShortId = null;
+        currentVideoElement = null;
+    }
+    checkForNewShort();
+}
+function stopAutoScrolling() {
+    applicationIsOn = false;
+    amountOfPlays = 0;
+    if (currentVideoElement) {
+        // Only restore loop attribute if loop disabling is OFF
+        if (!disableLooping) {
+            currentVideoElement.setAttribute("loop", "true");
+        }
+        currentVideoElement.removeEventListener("ended", shortEnded);
+        currentVideoElement._hasEndEvent = false;
+    }
+}
+async function checkForNewShort() {
+    if (!applicationIsOn || !isShortsPage())
+        return;
+    const currentShort = findShortContainer();
+    if (!currentShort)
+        return;
+    // Checks if the current short is the same as the last one
+    if (currentShort?.id != currentShortId) {
+        // Prevent scrolling from previous short ending
+        if (scrollTimeout)
+            clearTimeout(scrollTimeout);
+        // Remove event listener from the previous video element
+        const previousShort = currentVideoElement;
+        if (previousShort) {
+            previousShort.removeEventListener("ended", shortEnded);
+            previousShort._hasEndEvent = false;
+        }
+        // Set the new current short id and video element.
+        // Prefer the index of the short in the current DOM list (more stable
+        // than relying on the element's `id` attribute which can be missing
+        // or non-numeric).
+        let shortsList = [];
+        for (let i = 0; i < VIDEOS_LIST_SELECTORS.length; i++) {
+            const list = Array.from(document.querySelectorAll(VIDEOS_LIST_SELECTORS[i]));
+            if (list.length > 0) {
+                shortsList = list;
+                break;
+            }
+        }
+        const foundIndex = shortsList.length > 0 ? shortsList.findIndex((s) => s === currentShort) : -1;
+        if (foundIndex >= 0) {
+            currentShortId = foundIndex;
+        }
+        else {
+            const parsed = parseInt((currentShort.id || "").toString());
+            currentShortId = isNaN(parsed) ? 0 : parsed;
+        }
+        currentVideoElement = currentShort?.querySelector("video");
+        // Looping check if the current short has a video element
+        if (currentVideoElement == null) {
+            let l = 0;
+            while (currentVideoElement == null) {
+                currentVideoElement = currentShort?.querySelector("video");
+                if (l > MAX_RETRIES) {
+                    // If the video element is not found, scroll to the next short
+                    let prevShortId = currentShortId;
+                    console.log("[Auto Youtube Shorts Scroller] Video element not found, scrolling to next short...");
+                    return scrollToNextShort(prevShortId);
+                }
+                await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS));
+                l++;
+            }
+        }
+        // Check if the current short is an ad
+        if (currentShort?.querySelector("ytd-ad-slot-renderer") ||
+            currentShort?.querySelector("ad-button-view-model")) {
+            console.log("[Auto Youtube Shorts Scroller] Ad detected..., scrolling to next short...");
+            return scrollToNextShort(currentShortId, false);
+        }
+        // Log the current short id
+        console.log("[Auto Youtube Shorts Scroller] Current ID of Short: ", currentShortId);
+        // Add event listener to the current video element
+        console.log("[Auto Youtube Shorts Scroller] Adding event listener to video element...", currentVideoElement);
+        currentVideoElement.addEventListener("ended", shortEnded);
+        currentVideoElement._hasEndEvent = true;
+        // Check if the current short has metadata
+        const isMetaDataHydrated = (selector) => {
+            return currentShort?.querySelector(selector) != null;
+        };
+        if (!isMetaDataHydrated(AUTHOUR_NAME_SELECTOR)) {
+            let l = 0;
+            // If the creator name is not found, wait for it to load (A long with other data)
+            while (!isMetaDataHydrated(AUTHOUR_NAME_SELECTOR)) {
+                if (isMetaDataHydrated(AUTHOUR_NAME_SELECTOR_2))
+                    break;
+                if (l > MAX_RETRIES) {
+                    // If after retries metadata still not hydrated, do NOT force scroll.
+                    // If video is playing, wait for its natural `ended` event to trigger
+                    // the normal scroll behavior. If not playing, simply give up for
+                    // now and let periodic checks re-evaluate — do not navigate.
+                    try {
+                        const vid = currentVideoElement;
+                        const isPlaying = vid && typeof vid.currentTime === "number" && !vid.ended && !vid.paused;
+                        if (isPlaying) {
+                            console.log("[Auto Youtube Shorts Scroller] Metadata not hydrated, video playing — waiting for natural end (no forced scroll).", vid);
+                            return; // wait for `ended` to handle navigation
+                        }
+                    }
+                    catch (err) {
+                        // ignore and continue to not force scroll
+                    }
+                    console.log("[Auto Youtube Shorts Scroller] Metadata not hydrated after retries — not forcing scroll.");
+                    return; // do not force scroll
+                }
+                await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS));
+                l++;
+            }
+        }
+        // Check if short meets the filter settings
+        const isValidShort = await checkShortValidity(currentShort);
+        if (!isValidShort) {
+            console.log("[Auto Youtube Shorts Scroller] Short doesn't meet the filter settings, scrolling to next short...");
+            return scrollToNextShort(currentShortId, true);
+        }
+    }
+    else {
+        // If the short hasn't changed, ensure we still have a valid video element
+        // and that the ended listener is attached (covers cases where the
+        // video element was replaced or the listener was removed).
+        try {
+            const videoEl = currentShort?.querySelector("video");
+            if (videoEl) {
+                if (currentVideoElement !== videoEl)
+                    currentVideoElement = videoEl;
+                if (!currentVideoElement._hasEndEvent) {
+                    console.log("[Auto Youtube Shorts Scroller] Re-attaching event listener to video element...", currentVideoElement);
+                    currentVideoElement.addEventListener("ended", shortEnded);
+                    currentVideoElement._hasEndEvent = true;
+                }
+            }
+        }
+        catch (err) {
+            // Ignore any errors during re-attachment
+        }
+    }
+    // Force removal of the loop attribute based on settings
+    if (currentVideoElement?.hasAttribute("loop")) {
+        if (applicationIsOn || disableLooping) {
+            currentVideoElement.removeAttribute("loop");
+        }
+    }
+}
+function shortEnded(e) {
+    e.preventDefault();
+    if (!applicationIsOn)
+        return stopAutoScrolling();
+    console.log("[Auto Youtube Shorts Scroller] Short ended, scrolling to next short...");
+    amountOfPlays++;
+    // Checks amount of plays to skip the short
+    if (amountOfPlays >= amountOfPlaysToSkip) {
+        // If its same or exceeded the amount of plays, scroll to the next short
+        amountOfPlays = 0;
+        scrollToNextShort(currentShortId);
+    }
+    else {
+        // Only replay if loop disabling is OFF
+        if (!disableLooping) {
+            currentVideoElement.play();
+        }
+        else {
+            // If loop is disabled, force scroll to next video instead of replaying
+            amountOfPlays = 0;
+            scrollToNextShort(currentShortId);
+        }
+    }
+}
+async function scrollToNextShort(prevShortId = null, useDelayAndCheckComments = true) {
+    if (!applicationIsOn)
+        return stopAutoScrolling();
+    const comments = document.querySelector(COMMENTS_SELECTOR);
+    const isCommentsOpen = () => {
+        const visibilityOfComments = comments?.attributes["VISIBILITY"]?.value;
+        return visibilityOfComments === "ENGAGEMENT_PANEL_VISIBILITY_EXPANDED";
+    };
+    // Check if comments is open, and settings are set to scroll on comments
+    if (comments && useDelayAndCheckComments) {
+        if (isCommentsOpen() && !scrollOnCommentsCheck) {
+            useDelayAndCheckComments = false; // If the comments are open, don't wait for the additional scroll delay when scrolling
+            // If the comments are open, wait till they are closed (if the setting is set to scroll on comments)
+            while (isCommentsOpen() && // Waits till the comments are closed
+                !scrollOnCommentsCheck && // Stops if the setting is changed
+                prevShortId == currentShortId // Stops if the short changes
+            ) {
+                await new Promise((resolve) => setTimeout(resolve, 100));
+            }
+        }
+    }
+    if (scrollTimeout)
+        clearTimeout(scrollTimeout);
+    if (additionalScrollDelay > 0 && useDelayAndCheckComments) {
+        // If the additional scroll delay is set, only allow replay if loop disabling is OFF
+        if (!disableLooping) {
+            currentVideoElement.play();
+        }
+    }
+    scrollTimeout = setTimeout(async () => {
+        if (prevShortId != null && currentShortId != prevShortId)
+            return; // If the short changed, don't scroll
+        const nextShortContainer = await waitForNextShort();
+        if (nextShortContainer == null && isShortsPage())
+            return window.location.reload(); // If no next short is found, reload the page (Last resort)
+        // If next short container is found, remove the current video element end event listener
+        if (currentVideoElement) {
+            currentVideoElement.removeEventListener("ended", shortEnded);
+            currentVideoElement._hasEndEvent = false;
+        }
+        // Scroll to the next short container
+        nextShortContainer.scrollIntoView({
+            behavior: "smooth",
+            block: "nearest",
+            inline: "start",
+        });
+        // Then check the new short
+        checkForNewShort();
+    }, 
+    // Sets the additional scroll delay from settings
+    useDelayAndCheckComments ? additionalScrollDelay : 0);
+}
+function findShortContainer(id = null) {
+    let shorts = [];
+    // Finds the short container by the selector (Incase of updates)
+    for (let i = 0; i < VIDEOS_LIST_SELECTORS.length; i++) {
+        const shortList = [
+            ...document.querySelectorAll(VIDEOS_LIST_SELECTORS[i]),
+        ];
+        if (shortList.length > 0) {
+            shorts = [...shortList];
+            break;
+        }
+    }
+    // If an id is provided, try to find a short matching that id or index
+    if (id != null) {
+        if (shorts.length === 0)
+            return document.getElementById(id);
+        const byId = shorts.find((s) => s.id == id.toString());
+        if (byId)
+            return byId;
+        const idx = Number(id);
+        if (!isNaN(idx) && idx >= 0 && idx < shorts.length)
+            return shorts[idx];
+        return shorts[0];
+    }
+    // If no shorts are found, fall back to element by currentShortId
+    if (shorts.length === 0)
+        return document.getElementById(currentShortId || 0);
+    // Prefer any explicitly marked active short
+    const activeShort = shorts.find((short) => short.hasAttribute("is-active") || short.querySelector("[is-active]"));
+    if (activeShort)
+        return activeShort;
+    // Otherwise pick the short whose center is closest to the viewport center
+    const viewportCenter = window.innerHeight / 2;
+    let bestShort = shorts[0];
+    let bestDistance = Infinity;
+    for (let i = 0; i < shorts.length; i++) {
+        try {
+            const rect = shorts[i].getBoundingClientRect();
+            const center = rect.top + rect.height / 2;
+            const distance = Math.abs(center - viewportCenter);
+            if (distance < bestDistance) {
+                bestDistance = distance;
+                bestShort = shorts[i];
+            }
+        }
+        catch (err) {
+            continue;
+        }
+    }
+    return bestShort;
+}
+async function waitForNextShort(retries = 5, delay = 500) {
+    if (!isShortsPage())
+        return null;
+    for (let i = 0; i < retries; i++) {
+        // Find the next short container
+        const nextShort = findShortContainer(currentShortId + scrollDirection);
+        if (nextShort)
+            return nextShort;
+        // If none found, little slight screen shake to trigger hydration of new shorts
+        window.scrollBy(0, 100);
+        await new Promise((r) => setTimeout(r, delay));
+        window.scrollBy(0, -100);
+        await new Promise((r) => setTimeout(r, delay));
+    }
+    console.log("[Auto Youtube Shorts Scroller] The next short has not loaded in, reloading page...");
+    return null;
+}
+// Wait for metadata to be hydrated inside the provided short container.
+// Uses a MutationObserver to detect insertion of author/channel elements
+// and resolves true when found. Resolves false if the short is removed
+// from the document (prevents hanging when the short changes).
+async function waitForMetadata(currentShort) {
+    if (!currentShort)
+        return false;
+    const hasMetadata = () => {
+        try {
+            return (!!currentShort?.querySelector(AUTHOUR_NAME_SELECTOR) ||
+                !!currentShort?.querySelector(AUTHOUR_NAME_SELECTOR_2));
+        }
+        catch (err) {
+            return false;
+        }
+    };
+    if (hasMetadata())
+        return true;
+    return new Promise((resolve) => {
+        const observer = new MutationObserver(() => {
+            if (hasMetadata()) {
+                observer.disconnect();
+                resolve(true);
+                return;
+            }
+            // If the short has been removed from the document, stop waiting
+            if (!document.contains(currentShort)) {
+                observer.disconnect();
+                resolve(false);
+                return;
+            }
+        });
+        try {
+            observer.observe(currentShort, { childList: true, subtree: true });
+        }
+        catch (err) {
+            // If observe fails (unexpected), avoid hanging
+            resolve(false);
+        }
+    });
+}
+async function checkShortValidity(currentShort) {
+    const videoLength = currentVideoElement?.duration;
+    const viewCount = document.querySelector(VIEW_COUNT_SELECTOR);
+    const likeCount = document.querySelector(LIKES_COUNT_SELECTOR);
+    const commentCount = currentShort &&
+        currentShort?.querySelector(COMMENTS_COUNT_SELECTORS.join(","));
+    const tags = document.querySelectorAll(DESCRIPTION_TAGS_SELECTOR);
+    const creatorName = currentShort &&
+        (currentShort?.querySelector(AUTHOUR_NAME_SELECTOR) ||
+            currentShort?.querySelector(AUTHOUR_NAME_SELECTOR_2));
+    console.log("[Auto Youtube Shorts Scroller]", {
+        filters: [
+            { videoLength, filterMinLength, filterMaxLength },
+            { viewCount: viewCount?.innerText, filterMinViews, filterMaxViews },
+            { likeCount: likeCount?.innerText, filterMinLikes, filterMaxLikes },
+            {
+                commentCount: commentCount?.innerText,
+                filterMinComments,
+                filterMaxComments,
+            },
+            { tags: [...tags].map((tag) => tag.innerText) },
+            { creatorName: creatorName?.innerText },
+            { blockedTags },
+            { blockedCreators },
+            { whitelistedCreators },
+        ],
+    });
+    // Ignores all checks if whitelisted creator
+    if (!!creatorName && whitelistedCreators.length > 0) {
+        const creator = creatorName.innerText.trim().toLowerCase();
+        if (whitelistedCreators.map((cr) => cr.toLowerCase()).includes(creator) ||
+            whitelistedCreators
+                .map((cr) => cr.toLowerCase())
+                .includes(creator.replace("@", ""))) {
+            return true;
+        }
+    }
+    if (!checkValidVideoLength(videoLength))
+        return false;
+    if (viewCount && !checkValidViewCount(viewCount))
+        return false;
+    if (likeCount && !checkValidLikeCount(likeCount))
+        return false;
+    if (!!commentCount && !checkValidCommentCount(commentCount))
+        return false;
+    if (!checkValidTags(tags))
+        return false;
+    if (!!creatorName && !checkValidCreator(creatorName))
+        return false;
+    function checkValidVideoLength(videoLength) {
+        if (filterMinLength !== "none" && videoLength < parseInt(filterMinLength))
+            return false;
+        return !(filterMaxLength !== "none" && videoLength > parseInt(filterMaxLength));
+    }
+    function checkValidViewCount(viewCount) {
+        const viewCountText = viewCount.innerText
+            .trim()
+            .toLowerCase()
+            .replaceAll(",", "");
+        const filterMinViewsParsed = parseTextToNumber(filterMinViews);
+        const filterMaxViewsParsed = parseTextToNumber(filterMaxViews);
+        if (filterMinViews !== "none" &&
+            parseInt(viewCountText) < filterMinViewsParsed)
+            return false;
+        return !(filterMaxViews !== "none" &&
+            parseInt(viewCountText) > filterMaxViewsParsed);
+    }
+    function checkValidLikeCount(likeCount) {
+        const likeNum = parseTextToNumber(likeCount.innerText);
+        const filterMinLikesParsed = parseTextToNumber(filterMinLikes);
+        const filterMaxLikesParsed = parseTextToNumber(filterMaxLikes);
+        if (filterMinLikes !== "none" && likeNum < filterMinLikesParsed)
+            return false;
+        return !(filterMaxLikes !== "none" && likeNum > filterMaxLikesParsed);
+    }
+    function checkValidCommentCount(commentCount) {
+        const commentNum = parseTextToNumber(commentCount.innerText);
+        const filterMinCommentsParsed = parseTextToNumber(filterMinComments);
+        const filterMaxCommentsParsed = parseTextToNumber(filterMaxComments);
+        if (filterMinComments !== "none" && commentNum < filterMinCommentsParsed)
+            return false;
+        return !(filterMaxComments !== "none" && commentNum > filterMaxCommentsParsed);
+    }
+    function checkValidTags(tags) {
+        if (tags.length === 0 && scrollOnNoTags)
+            return false;
+        for (let i = 0; i < tags.length; i++) {
+            const tag = tags[i].innerText.toLowerCase();
+            if (blockedTags.map((bTag) => bTag.toLowerCase()).includes(tag) ||
+                blockedTags
+                    .map((bTag) => bTag.toLowerCase())
+                    .includes(tag.replace("#", "")))
+                return false;
+        }
+        return true;
+    }
+    function checkValidCreator(creatorName) {
+        const creator = creatorName.innerText.trim().toLowerCase();
+        return !(blockedCreators.map((cr) => cr.toLowerCase()).includes(creator) ||
+            blockedCreators
+                .map((cr) => cr.toLowerCase())
+                .includes(creator.replace("@", "")));
+    }
+    // If all checks pass, return true
+    return true;
+}
+// ------------------------------
+// INITIATION AND SETTINGS FETCH
+// ------------------------------
+(function initiate() {
+    browser.storage.local.get(["applicationIsOn"]).then((result) => {
+        if (result["applicationIsOn"] == null)
+            return startAutoScrolling();
+        if (result["applicationIsOn"])
+            startAutoScrolling();
+    });
+    checkForNewShort();
+    checkApplicationState();
+    setInterval(checkForNewShort, RETRY_DELAY_MS);
+    function checkApplicationState() {
+        browser.storage.local.get(["applicationIsOn"]).then((result) => {
+            if (applicationIsOn && result["applicationIsOn"] === false) {
+                stopAutoScrolling();
+            }
+            else if (result["applicationIsOn"] === true) {
+                startAutoScrolling();
+            }
+        });
+    }
+    (function onApplicationChange() {
+        browser.storage.onChanged.addListener((changes) => {
+            if (changes["applicationIsOn"]?.newValue) {
+                startAutoScrolling();
+            }
+            else if (changes["applicationIsOn"]?.newValue === false) {
+                stopAutoScrolling();
+            }
+        });
+    })();
+    (function getAllSettings() {
+        browser.storage.local.get([
+            "shortCutKeys",
+            "shortCutInteractKeys",
+            "scrollDirection",
+            "amountOfPlaysToSkip",
+            "filterByMinLength",
+            "filterByMaxLength",
+            "filterByMinViews",
+            "filterByMaxViews",
+            "filterByMinLikes",
+            "filterByMaxLikes",
+            "filterByMinComments",
+            "filterByMaxComments",
+            "filteredAuthors",
+            "filteredTags",
+            "scrollOnComments",
+            "scrollOnNoTags",
+            "whitelistedAuthors",
+            "additionalScrollDelay",
+            "disableLooping",
+        ]).then((result) => {
+            console.log("[Auto Youtube Shorts Scroller]", {
+                AutoYTScrollerSettings: result,
+            });
+            if (result["shortCutKeys"])
+                shortCutToggleKeys = [...result["shortCutKeys"]];
+            if (result["shortCutInteractKeys"])
+                shortCutInteractKeys = [...result["shortCutInteractKeys"]];
+            if (result["scrollDirection"]) {
+                if (result["scrollDirection"] === "up")
+                    scrollDirection = -1;
+                else
+                    scrollDirection = 1;
+            }
+            if (result["amountOfPlaysToSkip"])
+                amountOfPlaysToSkip = result["amountOfPlaysToSkip"];
+            if (result["scrollOnComments"])
+                scrollOnCommentsCheck = result["scrollOnComments"];
+            if (result["filterByMinLength"])
+                filterMinLength = result["filterByMinLength"];
+            if (result["filterByMaxLength"])
+                filterMaxLength = result["filterByMaxLength"];
+            if (result["filterByMinViews"])
+                filterMinViews = result["filterByMinViews"];
+            if (result["filterByMaxViews"])
+                filterMaxViews = result["filterByMaxViews"];
+            if (result["filterByMinLikes"])
+                filterMinLikes = result["filterByMinLikes"];
+            if (result["filterByMaxLikes"])
+                filterMaxLikes = result["filterByMaxLikes"];
+            if (result["filterByMinComments"])
+                filterMinComments = result["filterByMinComments"];
+            if (result["filterByMaxComments"])
+                filterMaxComments = result["filterByMaxComments"];
+            if (result["filteredAuthors"])
+                blockedCreators = [...result["filteredAuthors"]];
+            if (result["filteredTags"])
+                blockedTags = [...result["filteredTags"]];
+            if (result["whitelistedAuthors"])
+                whitelistedCreators = [...result["whitelistedAuthors"]];
+            if (result["scrollOnNoTags"])
+                scrollOnNoTags = result["scrollOnNoTags"];
+            if (result["additionalScrollDelay"])
+                additionalScrollDelay = result["additionalScrollDelay"];
+            if (result["disableLooping"] !== undefined)
+                disableLooping = result["disableLooping"];
+            // Start loop monitoring for YouTube Shorts
+            startLoopMonitoring();
+            shortCutListener();
+            // Add navigation key interception for switching shorts with next/previous video keys
+            navKeyShortsListener();
+        });
+        browser.storage.onChanged.addListener(async (result) => {
+            let newShortCutKeys = result["shortCutKeys"]?.newValue;
+            if (newShortCutKeys != undefined) {
+                shortCutToggleKeys = [...newShortCutKeys];
+            }
+            let newShortCutInteractKeys = result["shortCutInteractKeys"]?.newValue;
+            if (newShortCutInteractKeys != undefined) {
+                shortCutInteractKeys = [...newShortCutInteractKeys];
+            }
+            let newScrollDirection = result["scrollDirection"]?.newValue;
+            if (newScrollDirection != undefined) {
+                if (newScrollDirection === "up")
+                    scrollDirection = -1;
+                else
+                    scrollDirection = 1;
+            }
+            let newAmountOfPlaysToSkip = result["amountOfPlaysToSkip"]?.newValue;
+            if (newAmountOfPlaysToSkip) {
+                amountOfPlaysToSkip = newAmountOfPlaysToSkip;
+            }
+            let newScrollOnComments = result["scrollOnComments"]?.newValue;
+            if (newScrollOnComments !== undefined) {
+                scrollOnCommentsCheck = newScrollOnComments;
+            }
+            let newFilterMinLength = result["filterByMinLength"]?.newValue;
+            if (newFilterMinLength != undefined) {
+                filterMinLength = newFilterMinLength;
+            }
+            let newFilterMaxLength = result["filterByMaxLength"]?.newValue;
+            if (newFilterMaxLength != undefined) {
+                filterMaxLength = newFilterMaxLength;
+            }
+            let newFilterMinViews = result["filterByMinViews"]?.newValue;
+            if (newFilterMinViews != undefined) {
+                filterMinViews = newFilterMinViews;
+            }
+            let newFilterMaxViews = result["filterByMaxViews"]?.newValue;
+            if (newFilterMaxViews != undefined) {
+                filterMaxViews = newFilterMaxViews;
+            }
+            let newFilterMinLikes = result["filterByMinLikes"]?.newValue;
+            if (newFilterMinLikes != undefined) {
+                filterMinLikes = newFilterMinLikes;
+            }
+            let newFilterMaxLikes = result["filterByMaxLikes"]?.newValue;
+            if (newFilterMaxLikes != undefined) {
+                filterMaxLikes = newFilterMaxLikes;
+            }
+            let newFilterMinComments = result["filterByMinComments"]?.newValue;
+            if (newFilterMinComments != undefined) {
+                filterMinComments = newFilterMinComments;
+            }
+            let newFilterMaxComments = result["filterByMaxComments"]?.newValue;
+            if (newFilterMaxComments != undefined) {
+                filterMaxComments = newFilterMaxComments;
+            }
+            let newBlockedCreators = result["filteredAuthors"]?.newValue;
+            if (newBlockedCreators != undefined) {
+                blockedCreators = [...newBlockedCreators];
+            }
+            let newBlockedTags = result["filteredTags"]?.newValue;
+            if (newBlockedTags != undefined) {
+                blockedTags = [...result["filteredTags"]?.newValue];
+            }
+            let newWhiteListedCreators = result["whitelistedAuthors"]?.newValue;
+            if (newWhiteListedCreators != undefined) {
+                whitelistedCreators = [...newWhiteListedCreators];
+            }
+            let newScrollOnNoTags = result["scrollOnNoTags"]?.newValue;
+            if (newScrollOnNoTags !== undefined) {
+                scrollOnNoTags = newScrollOnNoTags;
+            }
+            let newAdditionalScrollDelay = result["additionalScrollDelay"]?.newValue;
+            if (newAdditionalScrollDelay !== undefined) {
+                additionalScrollDelay = newAdditionalScrollDelay;
+            }
+            let newDisableLooping = result["disableLooping"]?.newValue;
+            if (newDisableLooping !== undefined) {
+                disableLooping = newDisableLooping;
+                // Apply loop setting to current video immediately
+                applyLoopSetting();
+            }
+            if (!(await checkShortValidity(findShortContainer(currentShortId)))) {
+                await scrollToNextShort(currentShortId);
+            }
+        });
+    })();
+})();
+function shortCutListener() {
+    let pressedKeys = [];
+    // Web Dev Simplifed Debounce
+    function debounce(cb, delay) {
+        let timeout;
+        return (...args) => {
+            clearTimeout(timeout);
+            timeout = setTimeout(() => {
+                cb(...args);
+            }, delay);
+        };
+    }
+    const checkKeys = (keysToCheck, waitDebounce = true, delay = 700) => {
+        return new Promise((resolve) => {
+            function debounceCB() {
+                if (pressedKeys.length == keysToCheck.length) {
+                    let match = true;
+                    for (let i = 0; i < pressedKeys.length; i++) {
+                        if (pressedKeys[i] != keysToCheck[i]) {
+                            match = false;
+                            break;
+                        }
+                    }
+                    resolve(match);
+                }
+                else
+                    resolve(false);
+            }
+            if (waitDebounce)
+                debounce(debounceCB, delay)();
+            else
+                debounceCB();
+        });
+    };
+    document.addEventListener("keydown", async (e) => {
+        if (!e.key)
+            return;
+        pressedKeys.push(e.key.toLowerCase());
+        // Shortcut for toggle application on/off
+        if (await checkKeys(shortCutToggleKeys)) {
+            if (applicationIsOn) {
+                stopAutoScrolling();
+                await browser.storage.local.set({
+                    applicationIsOn: false,
+                });
+            }
+            else {
+                startAutoScrolling();
+                await browser.storage.local.set({
+                    applicationIsOn: true,
+                });
+            }
+        }
+        else if (await checkKeys(shortCutInteractKeys, false)) {
+            // Shortcut for like/dislike
+            const likeBtn = document.querySelector(LIKE_BUTTON_SELECTOR);
+            const dislikeBtn = document.querySelector(DISLIKE_BUTTON_SELECTOR);
+            if (likeBtn?.getAttribute("aria-pressed") === "true" ||
+                dislikeBtn?.getAttribute("aria-pressed") === "true") {
+                dislikeBtn.click();
+            }
+            else {
+                likeBtn.click();
+            }
+        }
+        pressedKeys = [];
+    });
+}
+// Intercept common "next/previous video" keyboard shortcuts and map them
+// to scrolling between Shorts when on a Shorts page. Runs in capture phase
+// to try to stop YouTube's default handlers.
+function navKeyShortsListener() {
+    async function manualScrollToOffset(offset) {
+        try {
+            if (!isShortsPage())
+                return;
+            // Find target short container by index
+            const target = findShortContainer((currentShortId || 0) + offset);
+            if (!target) {
+                // If not found, try to wait for next/prev to load by reusing waitForNextShort
+                const origDir = scrollDirection;
+                scrollDirection = offset > 0 ? 1 : -1;
+                const nextShort = await waitForNextShort();
+                scrollDirection = origDir;
+                if (!nextShort)
+                    return;
+                nextShort.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "start" });
+                checkForNewShort();
+                return;
+            }
+            // Remove end listener from previous video element if present
+            if (currentVideoElement) {
+                try {
+                    currentVideoElement.removeEventListener("ended", shortEnded);
+                    currentVideoElement._hasEndEvent = false;
+                }
+                catch (err) { }
+            }
+            target.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "start" });
+            checkForNewShort();
+        }
+        catch (err) {
+            console.error("[Auto Youtube Shorts Scroller] navKey manual scroll error", err);
+        }
+    }
+    document.addEventListener("keydown", (e) => {
+        try {
+            if (!isShortsPage())
+                return;
+            // Common shortcuts: Shift+N (next), Shift+P (previous)
+            if (e.shiftKey && e.key && e.key.toLowerCase() === "n") {
+                e.preventDefault();
+                e.stopImmediatePropagation();
+                manualScrollToOffset(1);
+                return;
+            }
+            if (e.shiftKey && e.key && e.key.toLowerCase() === "p") {
+                e.preventDefault();
+                e.stopImmediatePropagation();
+                manualScrollToOffset(-1);
+                return;
+            }
+            // Media keys
+            if (e.key === "MediaTrackNext" || e.key === "MediaNextTrack") {
+                e.preventDefault();
+                e.stopImmediatePropagation();
+                manualScrollToOffset(1);
+                return;
+            }
+            if (e.key === "MediaTrackPrevious" || e.key === "MediaPreviousTrack") {
+                e.preventDefault();
+                e.stopImmediatePropagation();
+                manualScrollToOffset(-1);
+                return;
+            }
+        }
+        catch (err) {
+            // swallow
+        }
+    }, true // capture phase
+    );
+}
+function isShortsPage() {
+    let containsShortElements = false;
+    const doesPageHaveAShort = document.querySelector(VIDEOS_LIST_SELECTORS.join(","));
+    if (doesPageHaveAShort)
+        containsShortElements = true;
+    return containsShortElements;
+}
+function parseTextToNumber(text) {
+    text = text.trim().toLowerCase();
+    if (text.endsWith("k")) {
+        return parseFloat(text) * 1_000;
+    }
+    if (text.endsWith("m")) {
+        return parseFloat(text) * 1_000_000;
+    }
+    return parseInt(text.replace(/,/g, "")) || 0; // Handle normal numbers like "933"
+}
